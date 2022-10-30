@@ -1,0 +1,841 @@
+################
+# Load packages
+################
+library(MASS)
+library(glmnet)
+#library(scout)
+library(Matrix)
+library(softImpute)
+#library(grplasso)
+library(robustbase)
+#library(CVglasso)
+#library(glasso)
+
+#################################################
+# The following functions are used for imputation 
+#################################################
+Impute.Xue<-function(row.old,col.obs,col.mis,row.new){  # col.obs is the index of observed predictors for regression col.mis+col.obs!=1:p
+  x.obs.old=X.all[row.old,col.obs]
+  x.mis.old=X.all[row.old,col.mis]
+  x.obs.new=X.all[row.new,col.obs]
+  x.mis.new=X.all[row.new,col.mis]
+  for(i.block in 1:length(col.mis)){
+    glm.impute=cv.glmnet(x.obs.old,x.mis.old[,i.block],intercept=F,lambda.min.ratio=0.0001)
+    beta.glm=as.vector(coef(glm.impute)[-1,])
+    if(sum(beta.glm!=0)!=0){
+      x.obs.reg.old=x.obs.old[,beta.glm!=0]
+      x.obs.reg.new=x.obs.new[,beta.glm!=0]
+      beta.lm=solve((t(x.obs.reg.old)%*%x.obs.reg.old),(t(x.obs.reg.old)%*%x.mis.old[,i.block]))
+      x.mis.new[,i.block]=x.obs.reg.new%*%beta.lm
+    }else{
+      x.mis.new[,i.block]=rep(mean(X.all[,col.mis[i.block]],na.rm=TRUE),length(row.new))
+    }
+  }
+  return(x.mis.new)
+} 
+
+Impute.Proposed<-function(col.obs,col.mis,row.new){
+  Omega=matrix(0,z,z)
+  for(j in col.mis){
+    aj=-(S.raw[j,j]-S.raw[j,-j]%*%Theta[,j])^(-1)
+    Omega[j,-j]=as.vector(aj)*Theta[,j]
+    Omega[j,j]=-aj
+  }
+  impute.value=-solve(Omega[col.mis,col.mis],Omega[col.mis,col.obs])%*%t(X.all[row.new,col.obs])
+  return(t(impute.value))
+} 
+
+####################################################################
+# The following function computes initial covariance matrix estimate 
+####################################################################
+xtx.pairwise<-function(x){
+  p=ncol(x)
+  cov.matrix=matrix(NA,p,p)
+  for(i in 1:p){
+    for(j in 1:p){
+      index=which((!is.na(x[,i]))&(!is.na(x[,j])))
+      x1=x[index,i]
+      x2=x[index,j]
+      cov.matrix[i,j]=sum(x1*x2)/length(index)
+    }
+  }
+  diag(cov.matrix)=rep(1,p)
+  return(cov.matrix)
+}
+
+
+###############################################################
+# Set parameters (Example 1 in the paper) with four modalities
+###############################################################
+nsim=30            # number of simulations
+n1=100             # number of samples with complete observations
+n2=20              # number of samples with observations from modality 1 and modality 2
+n3=20              # number of samples with observations from modality 1 and modality 3
+n4=20              # number of samples with observations from modality 2 and modality 3 
+n.all=n1+n2+n3+n4
+
+p1=20              # number of predictors from modality 1
+p2=20              # number of predictors from modality 2
+p3=20              # number of predictors from modality 3
+p4=20              # number of predictors from modality 4
+p=p1+p2+p3+p4      # the total number of predictors
+
+rho=0.5            # correlation between covariates 
+cor.type=5         # equal=1,decreasing=2,lower-bounded decreasing=3,blockwise-equal gaussian=4,blockwise-equal causal effect=5
+sigma=0.8          # control SNR in linear regression
+weight=0.5         # [0,1] control the weight decided by n vs by p 
+var=1              # variance of every predictors
+
+if(n1!=0){
+  num.method=6     # the number of methods to be compared
+}else{
+  num.method=5     # no Method CC
+}
+
+miss.type=1        # MCAR=1,MAR=2,NI=3
+blo4.in.y=FALSE    # block 4 has relevant predictors 
+
+if(miss.type==2){
+  blo4.in.y=FALSE
+}
+
+model.type=1       # linear model: 1 beta=0.5; logistics model: 2; poisson model: 3 beta=0.4  
+
+col.block1=1:p1
+col.block2=(p1+1):(p1+p2)
+col.block3=(p1+p2+1):(p1+p2+p3)
+if(blo4.in.y){
+  col.block4=(p1+p2+p3+1):(p1+p2+p3+p4)
+}
+
+if(n1!=0){
+  row.modality1=1:n1
+}
+row.modality2=(n1+1):(n1+n2)
+row.modality3=(n1+n2+1):(n1+n2+n3)
+row.modality4=(n1+n2+n3+1):(n1+n2+n3+n4)
+
+################################################################
+# Set the true regression coefficient vector in the linear model
+################################################################
+if(blo4.in.y){
+  d1=5    # also be the block size for blockwise-equal correlation
+  z=p1+p2+p3+p4
+  beta.i=0.4
+  beta.true=c(rep(beta.i,d1),rep(0,p1-d1),rep(beta.i,d1),rep(0,p2-d1),rep(beta.i,d1),rep(0,p3-d1),rep(beta.i,d1),rep(0,p4-d1))
+}else{
+  d1=2
+  z=p1+p2+p3
+  beta.i=0.5
+  beta.true=c(rep(beta.i,d1),rep(0,p1-d1),rep(beta.i,d1),rep(0,p2-d1),rep(beta.i,d1),rep(0,p3-d1))
+}
+
+##########################################################
+# Set the true covariance matrix of the predictor vector X
+##########################################################  
+if(cor.type==1){
+  cov.true=diag(1-rho,p,p)+matrix(rho,p,p)  
+}else if(cor.type==2){
+  cov.true=outer(1:p,1:p,function(row,column){rho^abs(row-column)}) 
+}else if(cor.type==3){
+  d2=5
+  cov.true=outer(1:p,1:p,function(row,column){ifelse(abs(row-column)<=(d2-1),rho^abs(row-column),0)})
+}else if(cor.type==4){
+  d2=5
+  cov.in.block=diag(1-rho,d2,d2)+matrix(rho,d2,d2)
+  cov.true=as.matrix(bdiag(replicate((p/d2),cov.in.block,simplify=FALSE)))
+}
+
+##############################################################
+# Use the following five measures to compare different methods
+##############################################################
+fpr_results=matrix(NA,nsim,num.method)      # false positive rate
+fnr_results=matrix(NA,nsim,num.method)      # false negative rate
+EE_results=matrix(NA,nsim,num.method)      # estimation error
+PE_results=matrix(NA,nsim,num.method)      # prediction error
+time_results=matrix(NA,nsim,num.method)     # the elapsed time in seconds using R
+beta.estall=matrix(NA,nsim,(num.method)*z)
+EX_results=matrix(NA,nsim,4) 
+
+
+
+for(sim in 1:nsim){
+  #############################
+  # generate the training data
+  #############################
+  set.seed(sim+400)
+  p=z
+  if(cor.type==1|cor.type==2|cor.type==3|cor.type==4){
+    X.all=matrix(rnorm(n.all*p,mean=0,sd=sqrt(var)),n.all,p)%*%chol(cov.true)
+  }else if(cor.type==5){
+    cor.t=1        ## control correlation between x  
+    w=matrix((rgamma(n.all*p,shape=1,rate=2)-0.5)*2,n.all,p)
+    u=matrix(rep((rgamma(n.all,shape=1,rate=2)-0.5)*2,p),n.all,p)
+    X.all=(w+cor.t*u)/sqrt(1+cor.t^2)
+  }
+  
+  if(blo4.in.y){
+    theta.y=X.all%*%beta.true
+  }else{
+    theta.y=X.all[,1:(p1+p2+p3)]%*%beta.true
+  }
+  
+  if(model.type==1){
+    Y=theta.y+sigma*rnorm(n1+n2+n3+n4)
+    #Y=theta.y+sigma*rt(n1+n2+n3+n4,df=4)/sqrt(4/2)
+    #Y=theta.y+sigma*rgamma(n1+n2+n3+n4,shape=1,rate=2)/2
+  }else if(model.type==2){
+    Y=matrix(rbinom(n=n1+n2+n3+n4,size=1,prob=exp(theta.y)/(1+exp(theta.y))),n1+n2+n3+n4,1)
+  }else if(model.type==3){
+    Y=matrix(rpois(n=n1+n2+n3+n4,lambda=exp(theta.y)),n1+n2+n3+n4,1)
+  }
+  
+  if(miss.type==2){
+    prob0=exp(-10*apply(X.all[,(p1+p2+p3+1):(p1+p2+p3+p4)],1,sum))
+    if(sum(prob0==Inf)>0){
+      prob0[prob0==Inf]=max(prob0[!prob0==Inf])
+    }
+    if(n1!=0){
+      No.all=1:(n1+n2+n3+n4)
+      modality1=sample(No.all,n1,prob=prob0)
+      modality2=sample(No.all[-modality1],n2)
+      modality3=sample(No.all[-c(modality1,modality2)],n3)
+      modality4=No.all[-c(modality1,modality2,modality3)]
+      
+      X.modality1=X.all[modality1,]
+      Y.modality1=Y[modality1,]
+      X.modality2=X.all[modality2,]
+      Y.modality2=Y[modality2,]
+      X.modality3=X.all[modality3,]
+      Y.modality3=Y[modality3,]
+      X.modality4=X.all[modality4,]
+      Y.modality4=Y[modality4,]
+      
+      X.all=rbind(X.modality1,X.modality2,X.modality3,X.modality4)
+      Y=matrix(c(Y.modality1,Y.modality2,Y.modality3,Y.modality4),(n1+n2+n3+n4),1)
+    }else{
+      No.all=1:(n2+n3+n4)
+      modality2=sample(No.all,n2,prob=prob0)
+      modality3=sample(No.all[-modality2],n2)
+      modality4=No.all[-c(modality2,modality3)]
+      
+      X.modality2=X.all[modality2,]
+      Y.modality2=Y[modality2,]
+      X.modality3=X.all[modality3,]
+      Y.modality3=Y[modality3,]
+      X.modality4=X.all[modality4,]
+      Y.modality4=Y[modality4,]
+      
+      X.all=rbind(X.modality2,X.modality3,X.modality4)
+      Y=matrix(c(Y.modality2,Y.modality3,Y.modality4),(n2+n3+n4),1)
+    }
+  }
+  
+  if(miss.type==3){
+    prob0=1/(1+exp(-Y))
+    if(sum(prob0==Inf)>0){
+      prob0[prob0==Inf]=max(prob0[!prob0==Inf])
+    }
+    if(n1!=0){
+      No.all=1:(n1+n2+n3+n4)
+      modality1=sample(No.all,n1,prob=prob0)
+      modality2=sample(No.all[-modality1],n2)
+      modality3=sample(No.all[-c(modality1,modality2)],n3)
+      modality4=No.all[-c(modality1,modality2,modality3)]
+      
+      X.modality1=X.all[modality1,]
+      Y.modality1=Y[modality1,]
+      X.modality2=X.all[modality2,]
+      Y.modality2=Y[modality2,]
+      X.modality3=X.all[modality3,]
+      Y.modality3=Y[modality3,]
+      X.modality4=X.all[modality4,]
+      Y.modality4=Y[modality4,]
+      
+      X.all=rbind(X.modality1,X.modality2,X.modality3,X.modality4)
+      Y=matrix(c(Y.modality1,Y.modality2,Y.modality3,Y.modality4),(n1+n2+n3+n4),1)
+    }else{
+      No.all=1:(n2+n3+n4)
+      modality2=sample(No.all,n2,prob=prob0)
+      modality3=sample(No.all[-modality2],n2)
+      modality4=No.all[-c(modality2,modality3)]
+      
+      X.modality2=X.all[modality2,]
+      Y.modality2=Y[modality2,]
+      X.modality3=X.all[modality3,]
+      Y.modality3=Y[modality3,]
+      X.modality4=X.all[modality4,]
+      Y.modality4=Y[modality4,]
+      
+      X.all=rbind(X.modality2,X.modality3,X.modality4)
+      Y=matrix(c(Y.modality2,Y.modality3,Y.modality4),(n2+n3+n4),1)
+    }
+  }
+  
+  X.nomissed=X.all 
+  
+  X.all[(n1+1):(n1+n2),(p1+p2+1):(p1+p2+p3)]=NA
+  X.all[(n1+n2+1):(n1+n2+n3),(p1+1):(p1+p2)]=NA
+  X.all[(n1+n2+n3+1):(n1+n2+n3+n4),1:p1]=NA  
+  
+  X.all=X.all[,1:z]
+  
+  ################
+  # Standarization
+  ################
+  mean.col=as.vector(apply(X.all,2,function(x){sum(x,na.rm=TRUE)/sum(!is.na(x))}))
+  mean.matrix=matrix(rep(mean.col,each=nrow(X.all)),nrow(X.all),ncol(X.all))
+  sd.col=as.vector(apply((X.all-mean.matrix),2,function(x){sqrt(sum(x^2,na.rm=TRUE)/sum(!is.na(x)))}))
+  sd.matrix=matrix(rep(sd.col,each=nrow(X.all)),nrow(X.all),ncol(X.all))
+  X.all=(X.all-mean.matrix)/sd.matrix
+  
+  ##############################################
+  # glm for predicting missing data + overlapped
+  ##############################################
+  start=proc.time()[3]
+  complete=ifelse(n1!=0,1,0)
+  n.overlapped=n1+2*n2+n2*complete+2*n3+n3*complete+2*n4+n4*complete
+  X.overlapped=matrix(NA,n.overlapped,z)
+  Y.overlapped=matrix(NA,n.overlapped,1)
+  #red
+  if(n1!=0){
+    row.overlapped=1:n1
+    row.new=row.modality1
+    X.overlapped[row.overlapped,]=X.all[row.new,]
+    Y.overlapped[row.overlapped,]=Y[row.new,]      
+  }
+  
+  #yellow
+  col.mis=col.block3
+  row.new=row.modality2
+  #1
+  if(n1!=0){
+    row.overlapped=(n1+1):(n1+n2)
+    row.old=row.modality1
+    if(blo4.in.y){
+      col.obs=c(col.block1,col.block2,col.block4)
+    }else{
+      col.obs=c(col.block1,col.block2)
+    }
+    X.overlapped[row.overlapped,col.mis]=Impute.Xue(row.old=row.old,col.obs=col.obs,col.mis=col.mis,row.new=row.new)
+    X.overlapped[row.overlapped,-col.mis]=X.all[row.new,-col.mis]	
+    Y.overlapped[row.overlapped,]=Y[row.new,]   
+  }
+  
+  #1+3
+  if(n1!=0){
+    row.old=c(row.modality1,row.modality3)
+    row.overlapped=(n1+n2+1):(n1+2*n2)
+  }else{
+    row.old=c(row.modality3)
+    row.overlapped=1:n2
+  }
+  if(blo4.in.y){
+    col.obs=c(col.block1,col.block4)
+  }else{
+    col.obs=c(col.block1)
+  }
+  X.overlapped[row.overlapped,col.mis]=Impute.Xue(row.old=row.old,col.obs=col.obs,col.mis=col.mis,row.new=row.new)
+  X.overlapped[row.overlapped,-col.mis]=X.all[row.new,-col.mis]
+  Y.overlapped[row.overlapped,]=Y[row.new,]   
+  
+  #1+4
+  if(n1!=0){
+    row.old=c(row.modality1,row.modality4)
+    row.overlapped=(n1+2*n2+1):(n1+3*n2)
+  }else{
+    row.old=c(row.modality4)
+    row.overlapped=(n2+1):(2*n2)		
+  }  
+  if(blo4.in.y){
+    col.obs=c(col.block2,col.block4)
+  }else{
+    col.obs=c(col.block2)
+  }
+  X.overlapped[row.overlapped,col.mis]=Impute.Xue(row.old=row.old,col.obs=col.obs,col.mis=col.mis,row.new=row.new)
+  X.overlapped[row.overlapped,-col.mis]=X.all[row.new,-col.mis]  
+  Y.overlapped[row.overlapped,]=Y[row.new,]   
+  
+  #green
+  col.mis=col.block2
+  row.new=row.modality3
+  #1
+  if(n1!=0){
+    row.old=row.modality1
+    if(blo4.in.y){
+      col.obs=c(col.block1,col.block3,col.block4)
+    }else{
+      col.obs=c(col.block1,col.block3)
+    }
+    row.overlapped=(n1+3*n2+1):(n1+3*n2+n3)
+    X.overlapped[row.overlapped,col.mis]=Impute.Xue(row.old=row.old,col.obs=col.obs,col.mis=col.mis,row.new=row.new)
+    X.overlapped[row.overlapped,-col.mis]=X.all[row.new,-col.mis]
+    Y.overlapped[row.overlapped,]=Y[row.new,]   
+  }
+  
+  #1+2
+  if(n1!=0){
+    row.old=c(row.modality1,row.modality2)
+    row.overlapped=(n1+3*n2+n3+1):(n1+3*n2+2*n3)
+  }else{
+    row.old=c(row.modality2)
+    row.overlapped=(2*n2+1):(2*n2+n3)
+  }  
+  if(blo4.in.y){
+    col.obs=c(col.block1,col.block4)
+  }else{
+    col.obs=c(col.block1)
+  }
+  X.overlapped[row.overlapped,col.mis]=Impute.Xue(row.old=row.old,col.obs=col.obs,col.mis=col.mis,row.new=row.new)
+  X.overlapped[row.overlapped,-col.mis]=X.all[row.new,-col.mis]
+  Y.overlapped[row.overlapped,]=Y[row.new,]   
+  
+  #1+4
+  if(n1!=0){
+    row.old=c(row.modality1,row.modality4)
+    row.overlapped=(n1+3*n2+2*n3+1):(n1+3*n2+3*n3)
+  }else{
+    row.old=c(row.modality4)
+    row.overlapped=(2*n2+n3+1):(2*n2+2*n3)
+  }  
+  if(blo4.in.y){
+    col.obs=c(col.block3,col.block4)
+  }else{
+    col.obs=c(col.block3)
+  }
+  X.overlapped[row.overlapped,col.mis]=Impute.Xue(row.old=row.old,col.obs=col.obs,col.mis=col.mis,row.new=row.new)
+  X.overlapped[row.overlapped,-col.mis]=X.all[row.new,-col.mis]
+  Y.overlapped[row.overlapped,]=Y[row.new,]  
+  
+  #blue
+  col.mis=col.block1
+  row.new=row.modality4
+  #1
+  if(n1!=0){
+    row.old=row.modality1
+    if(blo4.in.y){
+      col.obs=c(col.block2,col.block3,col.block4)
+    }else{
+      col.obs=c(col.block2,col.block3)
+    }
+    row.overlapped=(n1+3*n2+3*n3+1):(n1+3*n2+3*n3+n4)
+    X.overlapped[row.overlapped,col.mis]=Impute.Xue(row.old=row.old,col.obs=col.obs,col.mis=col.mis,row.new=row.new)
+    X.overlapped[row.overlapped,-col.mis]=X.all[row.new,-col.mis]
+    Y.overlapped[row.overlapped,]=Y[row.new,]   
+  }
+  
+  #1+2
+  if(n1!=0){
+    row.old=c(row.modality1,row.modality2)
+    row.overlapped=(n1+3*n2+3*n3+n4+1):(n1+3*n2+3*n3+2*n4)
+  }else{
+    row.old=c(row.modality2)
+    row.overlapped=(2*n2+2*n3+1):(2*n2+2*n3+n4)
+  }  
+  if(blo4.in.y){
+    col.obs=c(col.block2,col.block4)
+  }else{
+    col.obs=c(col.block2)
+  }
+  X.overlapped[row.overlapped,col.mis]=Impute.Xue(row.old=row.old,col.obs=col.obs,col.mis=col.mis,row.new=row.new)
+  X.overlapped[row.overlapped,-col.mis]=X.all[row.new,-col.mis]
+  Y.overlapped[row.overlapped,]=Y[row.new,]   
+  
+  #1+3
+  if(n1!=0){
+    row.old=c(row.modality1,row.modality3)
+    row.overlapped=(n1+3*n2+3*n3+2*n4+1):(n1+3*n2+3*n3+3*n4)
+  }else{
+    row.old=c(row.modality3)
+    row.overlapped=(2*n2+2*n3+n4+1):(2*n2+2*n3+2*n4)
+  }  
+  if(blo4.in.y){
+    col.obs=c(col.block3,col.block4)
+  }else{
+    col.obs=c(col.block3)
+  }
+  X.overlapped[row.overlapped,col.mis]=Impute.Xue(row.old=row.old,col.obs=col.obs,col.mis=col.mis,row.new=row.new)
+  X.overlapped[row.overlapped,-col.mis]=X.all[row.new,-col.mis] 
+  Y.overlapped[row.overlapped,]=Y[row.new,]   
+  
+  time.impute=proc.time()[3]-start
+  
+  if(model.type==1){
+    lasso.overlapped=cv.glmnet(X.overlapped,Y.overlapped,family="gaussian",intercept=TRUE)
+  }else if(model.type==2){
+    lasso.overlapped=cv.glmnet(X.overlapped,Y.overlapped,family="binomial",intercept=TRUE)
+  }else if(model.type==3){
+    lasso.overlapped=cv.glmnet(X.overlapped,Y.overlapped,family="poisson",intercept=TRUE)
+  }
+  beta.overlapped=as.vector(coef(lasso.overlapped)[-1,])
+  lasso.overlapped.fpr=sum((beta.true==0)&(beta.overlapped!=0))/sum(beta.true==0)
+  lasso.overlapped.fnr=sum((beta.true!=0)&(beta.overlapped==0))/sum(beta.true!=0)
+  
+  if(sum(beta.overlapped!=0)>0){
+    X.selected=X.overlapped[,beta.overlapped!=0]
+    if(model.type==1){
+      beta.overlapped.ls=coef(cv.glmnet(x=X.selected,y=Y.overlapped,family="gaussian",alpha=0))[-1,]
+    }else if(model.type==2){
+      beta.overlapped.ls=coef(cv.glmnet(x=X.selected,y=Y.overlapped,family="binomial",alpha=0))[-1,]
+    }else if(model.type==3){
+      beta.overlapped.ls=coef(cv.glmnet(x=X.selected,y=Y.overlapped,family="poisson",alpha=0))[-1,]
+    }   
+    beta.final=rep(0,z)
+    beta.final[beta.overlapped!=0]=as.vector(beta.overlapped.ls)
+    beta.overlapped=beta.final
+  }else{
+    beta.overlapped=rep(0,z)
+  }
+  
+  overlapped.est.error=sqrt(sum((beta.overlapped*sd.col-beta.true)^2))
+  overlapped.time=proc.time()[3]-start
+  beta.estall[sim,1:z]=beta.overlapped
+  
+  ####################################################
+  # glm for predicting missing data + weighted average
+  ####################################################
+  start=proc.time()[3]	
+  X.averaged=matrix(NA,(n1+n2+n3+n4),z)
+  
+  if(n1!=0){
+    #red
+    X.averaged[1:n1,]=X.overlapped[1:n1,]
+    #yellow
+    yellow1=weight*n1/(n1+n1+n3+n1+n4)+(1-weight)*(p1+p2+p4)/(p1+p2+p4+p1+p4+p2+p4)
+    yellow13=weight*(n1+n3)/(n1+n1+n3+n1+n4)+(1-weight)*(p1+p4)/(p1+p2+p4+p1+p4+p2+p4)
+    yellow14=weight*(n1+n4)/(n1+n1+n3+n1+n4)+(1-weight)*(p2+p4)/(p1+p2+p4+p1+p4+p2+p4)
+    X.averaged[(n1+1):(n1+n2),]=X.overlapped[(n1+1):(n1+n2),]*yellow1+X.overlapped[(n1+n2+1):(n1+2*n2),]*yellow13+X.overlapped[(n1+2*n2+1):(n1+3*n2),]*yellow14
+    #green
+    green1=weight*n1/(n1+n1+n2+n1+n4)+(1-weight)*(p1+p3+p4)/(p1+p3+p4+p1+p4+p3+p4)
+    green12=weight*(n1+n2)/(n1+n1+n2+n1+n4)+(1-weight)*(p1+p4)/(p1+p3+p4+p1+p4+p3+p4)
+    green14=weight*(n1+n4)/(n1+n1+n2+n1+n4)+(1-weight)*(p3+p4)/(p1+p3+p4+p1+p4+p3+p4)
+    X.averaged[(n1+n2+1):(n1+n2+n3),]=X.overlapped[(n1+3*n2+1):(n1+3*n2+n3),]*green1+X.overlapped[(n1+3*n2+n3+1):(n1+3*n2+2*n3),]*green12+X.overlapped[(n1+3*n2+2*n3+1):(n1+3*n2+3*n3),]*green14
+    #blue
+    blue1=weight*n1/(n1+n1+n2+n1+n3)+(1-weight)*(p2+p3+p4)/(p2+p3+p4+p2+p4+p3+p4)
+    blue12=weight*(n1+n2)/(n1+n1+n2+n1+n3)+(1-weight)*(p2+p4)/(p2+p3+p4+p2+p4+p3+p4)
+    blue13=weight*(n1+n3)/(n1+n1+n2+n1+n3)+(1-weight)*(p3+p4)/(p2+p3+p4+p2+p4+p3+p4)
+    X.averaged[(n1+n2+n3+1):(n1+n2+n3+n4),]=X.overlapped[(n1+3*n2+3*n3+1):(n1+3*n2+3*n3+n4),]*blue1+X.overlapped[(n1+3*n2+3*n3+n4+1):(n1+3*n2+3*n3+2*n4),]*blue12+X.overlapped[(n1+3*n2+3*n3+2*n4+1):(n1+3*n2+3*n3+3*n4),]*blue13
+  }else{
+    #yellow
+    yellow3=weight*n3/(n3+n4)+(1-weight)*(p1+p4)/(p1+p4+p2+p4)
+    yellow4=1-yellow3
+    X.averaged[1:n2,]=X.overlapped[1:n2,]*yellow3+X.overlapped[(n2+1):(2*n2),]*yellow4
+    #green
+    green2=weight*n2/(n2+n4)+(1-weight)*(p1+p4)/(p1+p4+p3+p4)
+    green4=weight*n4/(n2+n4)+(1-weight)*(p3+p4)/(p1+p4+p3+p4)
+    X.averaged[(n2+1):(n2+n3),]=X.overlapped[(2*n2+1):(2*n2+n3),]*green2+X.overlapped[(2*n2+n3+1):(2*n2+2*n3),]*green4
+    #blue
+    blue2=weight*n2/(n2+n3)+(1-weight)*(p2+p4)/(p2+p4+p3+p4)
+    blue3=weight*n3/(n2+n3)+(1-weight)*(p3+p4)/(p2+p4+p3+p4)
+    X.averaged[(n2+n3+1):(n2+n3+n4),]=X.overlapped[(2*n2+2*n3+1):(2*n2+2*n3+n4),]*blue2+X.overlapped[(2*n2+2*n3+n4+1):(2*n2+2*n3+2*n4),]*blue3
+  }
+  
+  Y.averaged=Y
+  
+  if(model.type==1){
+    lasso.averaged=cv.glmnet(X.averaged,Y.averaged,family="gaussian",intercept=TRUE)
+  }else if(model.type==2){
+    lasso.averaged=cv.glmnet(X.averaged,Y.averaged,family="binomial",intercept=TRUE)
+  }else if(model.type==3){
+    lasso.averaged=cv.glmnet(X.averaged,Y.averaged,family="poisson",intercept=TRUE)
+  }
+  
+  beta.averaged=as.vector(coef(lasso.averaged)[-1,])
+  lasso.averaged.fpr=sum((beta.true==0)&(beta.averaged!=0))/sum(beta.true==0)
+  lasso.averaged.fnr=sum((beta.true!=0)&(beta.averaged==0))/sum(beta.true!=0)	
+  
+  if(sum(beta.averaged!=0)>0){
+    X.selected=X.averaged[,beta.averaged!=0]
+    if(model.type==1){
+      beta.averaged.ls=coef(cv.glmnet(x=X.selected,y=Y.averaged,family="gaussian",alpha=0))[-1,]
+    }else if(model.type==2){
+      beta.averaged.ls=coef(cv.glmnet(x=X.selected,y=Y.averaged,family="binomial",alpha=0))[-1,]
+    }else if(model.type==3){
+      beta.averaged.ls=coef(cv.glmnet(x=X.selected,y=Y.averaged,family="poisson",alpha=0))[-1,]
+    }    
+    beta.final=rep(0,z)
+    beta.final[beta.averaged!=0]=as.vector(beta.averaged.ls)
+    beta.averaged=beta.final
+  }else{
+    beta.averaged=rep(0,z)
+  }
+  
+  averaged.est.error=sqrt(sum((beta.averaged*sd.col-beta.true)^2))
+  
+  time=proc.time()[3]-start
+  averaged.time=time+time.impute
+  averaged.ex=mean((X.averaged*sd.matrix+mean.matrix-X.nomissed[,1:z])^2)
+  beta.estall[sim,(z+1):(2*z)]=beta.averaged
+  
+  ####################################################
+  # glm for Gaussian graph imputaion (Proposed method)
+  ####################################################
+  start=proc.time()[3]
+  xtx.raw=xtx.pairwise(X.all) # Initial covariance matrices
+  S.raw=as.matrix(nearPD(xtx.raw)$mat)  # nearest semi-positive matrix
+  n.raw=500
+  X.raw=matrix(rnorm(n.raw*z,mean=0,sd=1),n.raw,z)%*%chol(S.raw)
+  Theta=matrix(NA,z-1,z) # every column is theta^(i)
+  for(i.graph in 1:z){
+    x.tilde=X.raw[,-i.graph]
+    y.tilde=X.raw[,i.graph]
+    gamma.lasso=cv.glmnet(x.tilde,y.tilde,intercept=TRUE)
+    Theta[,i.graph]=coef(gamma.lasso,s="lambda.1se")[-1,]
+  }
+  
+  X.gaussian=X.all
+  
+  #yellow
+  if(blo4.in.y){
+    col.obs=c(col.block1,col.block2,col.block4)
+  }else{
+    col.obs=c(col.block1,col.block2)
+  }
+  col.mis=col.block3
+  row.new=row.modality2
+  X.gaussian[row.new,col.mis]=Impute.Proposed(col.obs=col.obs,col.mis=col.mis,row.new=row.new)
+  
+  #green
+  if(blo4.in.y){
+    col.obs=c(col.block1,col.block3,col.block4)
+  }else{
+    col.obs=c(col.block1,col.block3)
+  }
+  col.mis=col.block2
+  row.new=row.modality3
+  X.gaussian[row.new,col.mis]=Impute.Proposed(col.obs=col.obs,col.mis=col.mis,row.new=row.new)
+  
+  #blue
+  if(blo4.in.y){
+    col.obs=c(col.block2,col.block3,col.block4)
+  }else{
+    col.obs=c(col.block2,col.block3)
+  }
+  col.mis=col.block1
+  row.new=row.modality4
+  X.gaussian[row.new,col.mis]=Impute.Proposed(col.obs=col.obs,col.mis=col.mis,row.new=row.new)
+  
+  Y.gaussian=Y
+  if(model.type==1){
+    lasso.gaussian=cv.glmnet(X.gaussian,Y.gaussian,family="gaussian",intercept=TRUE)
+  }else if(model.type==2){
+    lasso.gaussian=cv.glmnet(X.gaussian,Y.gaussian,family="binomial",intercept=TRUE)
+  }else if(model.type==3){
+    lasso.gaussian=cv.glmnet(X.gaussian,Y.gaussian,family="poisson",intercept=TRUE)
+  }
+  beta.gaussian=as.vector(coef(lasso.gaussian)[-1,])
+  lasso.gaussian.fpr=sum((beta.true==0)&(beta.gaussian!=0))/sum(beta.true==0)
+  lasso.gaussian.fnr=sum((beta.true!=0)&(beta.gaussian==0))/sum(beta.true!=0)
+  
+  if(sum(beta.gaussian!=0)>0){
+    X.selected=X.gaussian[,beta.gaussian!=0]
+    if(model.type==1){
+      beta.gaussian.ls=coef(cv.glmnet(x=X.selected,y=Y.gaussian,family="gaussian",alpha=0),s="lambda.min")[-1,]
+    }else if(model.type==2){
+      beta.gaussian.ls=coef(cv.glmnet(x=X.selected,y=Y.gaussian,family="binomial",alpha=0),s="lambda.min")[-1,]
+    }else if(model.type==3){
+      beta.gaussian.ls=coef(cv.glmnet(x=X.selected,y=Y.gaussian,family="poisson",alpha=0),s="lambda.min")[-1,]
+    }
+    beta.final=rep(0,z)
+    beta.final[beta.gaussian!=0]=as.vector(beta.gaussian.ls)
+    beta.gaussian=beta.final
+  }else{
+    beta.gaussian=rep(0,z)
+  }
+  
+  gaussian.est.error=sqrt(sum((beta.gaussian*sd.col-beta.true)^2))
+  gaussian.time=proc.time()[3]-start
+  gaussian.ex=mean((X.gaussian*sd.matrix+mean.matrix-X.nomissed[,1:z])^2)
+  beta.estall[sim,(2*z+1):(3*z)]=beta.gaussian
+  
+  
+  
+  ###################################
+  # Lasso method for the imputed data 
+  ###################################
+  start=proc.time()[3]
+  kfold=10
+  nlam=100
+  lamratio=0.0001
+  rank0=min(n.all,z)-1
+  lam0=lambda0(X.all)
+  lamseq=exp(seq(from=log(lam0),to=log(lam0*lamratio),length=nlam))
+  
+  error.lam=rep(0,nlam)
+  for(jj in 1:nlam){
+    lam=lamseq[jj]
+    error.k=0
+    for(k in 1:kfold){
+      X.cv=X.all
+      if(n1!=0){
+        dele.row=c(row.modality1[((k-1)*(n1/kfold)+1):(k*n1/kfold)],c(row.modality2,row.modality3,row.modality4)[((k-1)*((n.all-n1)/kfold)+1):(k*(n.all-n1)/kfold)])
+      }else{
+        dele.row=c(row.modality2,row.modality3,row.modality4)[((k-1)*((n.all-n1)/kfold)+1):(k*(n.all-n1)/kfold)]
+      }
+      X.cv[dele.row,]=NA
+      softimp=softImpute(X.cv,rank.max=rank0,lambda=lam,type="svd")
+      complete.cv=complete(X.cv,softimp)
+      error.k=mean((complete.cv[dele.row,]-X.all[dele.row,])^2,na.rm=TRUE)+error.k
+    }
+    error.lam[jj]=error.k
+  }
+  opt.lam=lamseq[which.min(error.lam)]
+  
+  optsoft=softImpute(X.all,rank.max=rank0,lambda=opt.lam,type="svd")
+  X.imputed=complete(X.all,optsoft)    # Use the Soft-thresholded SVD method to impute the missing data
+  Y.imputed=Y
+  if(model.type==1){
+    lasso.imputed=cv.glmnet(X.imputed,Y.imputed,family="gaussian",intercept=TRUE)
+  }else if(model.type==2){
+    lasso.imputed=cv.glmnet(X.imputed,Y.imputed,family="binomial",intercept=TRUE)
+  }else if(model.type==3){
+    lasso.imputed=cv.glmnet(X.imputed,Y.imputed,family="poisson",intercept=TRUE)
+  }
+  beta.imputed=as.vector(coef(lasso.imputed)[-1,])
+  lasso.imputed.fpr=sum((beta.true==0)&(beta.imputed!=0))/sum(beta.true==0)
+  lasso.imputed.fnr=sum((beta.true!=0)&(beta.imputed==0))/sum(beta.true!=0)
+  
+  if(sum(beta.imputed!=0)>0){
+    X.selected=X.imputed[,beta.imputed!=0]
+    if(model.type==1){
+      beta.imputed.ls=coef(cv.glmnet(x=X.selected,y=Y.imputed,family="gaussian",alpha=0))[-1,]
+    }else if(model.type==2){
+      beta.imputed.ls=coef(cv.glmnet(x=X.selected,y=Y.imputed,family="binomial",alpha=0))[-1,]
+    }else if(model.type==3){
+      beta.imputed.ls=coef(cv.glmnet(x=X.selected,y=Y.imputed,family="poisson",alpha=0))[-1,]
+    }   
+    beta.final=rep(0,z)
+    beta.final[beta.imputed!=0]=as.vector(beta.imputed.ls)
+    beta.imputed=beta.final
+  }else{
+    beta.imputed=rep(0,z)
+  }
+  
+  imputed.est.error=sqrt(sum((beta.imputed*sd.col-beta.true)^2))
+  imputed.time=proc.time()[3]-start
+  imputed.ex=mean((X.imputed*sd.matrix+mean.matrix-X.nomissed[,1:z])^2)
+  beta.estall[sim,(3*z+1):(4*z)]=beta.imputed
+  
+  ########################################
+  # Lasso method for the zero-imputed data 
+  ########################################
+  start=proc.time()[3]
+  X.zero=X.all
+  X.zero[is.na(X.zero)]=0
+  Y.zero=Y
+  if(model.type==1){
+    lasso.zero=cv.glmnet(X.zero,Y.zero,family="gaussian",intercept=TRUE)
+  }else if(model.type==2){
+    lasso.zero=cv.glmnet(X.zero,Y.zero,family="binomial",intercept=TRUE)
+  }else if(model.type==3){
+    lasso.zero=cv.glmnet(X.zero,Y.zero,family="poisson",intercept=TRUE)
+  }
+  beta.zero=as.vector(coef(lasso.zero)[-1,])
+  lasso.zero.fpr=sum((beta.true==0)&(beta.zero!=0))/sum(beta.true==0)
+  lasso.zero.fnr=sum((beta.true!=0)&(beta.zero==0))/sum(beta.true!=0)
+  
+  if(sum(beta.zero!=0)>0){
+    X.selected=X.zero[,beta.zero!=0]
+    if(model.type==1){
+      beta.zero.ls=coef(cv.glmnet(x=X.selected,y=Y.zero,family="gaussian",alpha=0))[-1,]
+    }else if(model.type==2){
+      beta.zero.ls=coef(cv.glmnet(x=X.selected,y=Y.zero,family="binomial",alpha=0))[-1,]
+    }else if(model.type==3){
+      beta.zero.ls=coef(cv.glmnet(x=X.selected,y=Y.zero,family="poisson",alpha=0))[-1,]
+    }   
+    beta.final=rep(0,z)
+    beta.final[beta.zero!=0]=as.vector(beta.zero.ls)
+    beta.zero=beta.final
+  }else{
+    beta.zero=rep(0,z)
+  }
+  
+  zero.est.error=sqrt(sum((beta.zero*sd.col-beta.true)^2))
+  zero.time=proc.time()[3]-start
+  zero.ex=mean((X.zero*sd.matrix+mean.matrix-X.nomissed[,1:z])^2)
+  beta.estall[sim,(4*z+1):(5*z)]=beta.zero
+  
+  
+  #####################################
+  # Lasso method for the complete cases
+  #####################################
+  if(n1!=0){
+    start=proc.time()[3]
+    X.cc=X.all[1:n1,]   # Use the Soft-thresholded SVD method to impute the missing data
+    Y.cc=Y[1:n1]
+    if(model.type==1){
+      lasso.cc=cv.glmnet(X.cc,Y.cc,family="gaussian",intercept=TRUE)
+    }else if(model.type==2){
+      lasso.cc=cv.glmnet(X.cc,Y.cc,family="binomial",intercept=TRUE)
+    }else if(model.type==3){
+      lasso.cc=cv.glmnet(X.cc,Y.cc,family="poisson",intercept=TRUE)
+    }
+    beta.cc=as.vector(coef(lasso.cc)[-1,])
+    lasso.cc.fpr=sum((beta.true==0)&(beta.cc!=0))/sum(beta.true==0)
+    lasso.cc.fnr=sum((beta.true!=0)&(beta.cc==0))/sum(beta.true!=0)
+    
+    if(sum(beta.cc!=0)>0){
+      X.selected=X.cc[,beta.cc!=0]
+      if(model.type==1){
+        beta.cc.ls=coef(cv.glmnet(x=X.selected,y=Y.cc,family="gaussian",alpha=0))[-1,]
+      }else if(model.type==2){
+        beta.cc.ls=coef(cv.glmnet(x=X.selected,y=Y.cc,family="binomial",alpha=0))[-1,]
+      }else if(model.type==3){
+        beta.cc.ls=coef(cv.glmnet(x=X.selected,y=Y.cc,family="poisson",alpha=0))[-1,]
+      }   
+      beta.final=rep(0,z)
+      beta.final[beta.cc!=0]=as.vector(beta.cc.ls)
+      beta.cc=beta.final
+    }else{
+      beta.cc=rep(0,z)
+    }
+    
+    cc.est.error=sqrt(sum((beta.cc*sd.col-beta.true)^2))
+    cc.time=proc.time()[3]-start
+    beta.estall[sim,(5*z+1):(6*z)]=beta.cc
+  }
+  
+  if(n1!=0){
+    EE_results[sim,]=c(overlapped.est.error,averaged.est.error,gaussian.est.error,imputed.est.error,zero.est.error,cc.est.error)      
+    fpr_results[sim,]=c(lasso.overlapped.fpr,lasso.averaged.fpr,lasso.gaussian.fpr,lasso.imputed.fpr,lasso.zero.fpr,lasso.cc.fpr)      
+    fnr_results[sim,]=c(lasso.overlapped.fnr,lasso.averaged.fnr,lasso.gaussian.fnr,lasso.imputed.fnr,lasso.zero.fnr,lasso.cc.fnr) 
+    time_results[sim,]=c(overlapped.time,averaged.time,gaussian.time,imputed.time,zero.time,cc.time)
+    EX_results[sim,]=c(averaged.ex,gaussian.ex,imputed.ex,zero.ex) 
+  }else{
+    EE_results[sim,]=c(overlapped.est.error,averaged.est.error,gaussian.est.error,imputed.est.error,zero.est.error)      
+    fpr_results[sim,]=c(lasso.overlapped.fpr,lasso.averaged.fpr,lasso.gaussian.fpr,lasso.imputed.fpr,lasso.zero.fpr)      
+    fnr_results[sim,]=c(lasso.overlapped.fnr,lasso.averaged.fnr,lasso.gaussian.fnr,lasso.imputed.fnr,lasso.zero.fnr) 
+    time_results[sim,]=c(overlapped.time,averaged.time,gaussian.time,imputed.time,zero.time)
+    EX_results[sim,]=c(averaged.ex,gaussian.ex,imputed.ex,zero.ex)
+  }
+}
+
+beta.all.gaussian=beta.estall[,(2*z+1):(3*z)]
+
+####################
+# Report the results
+####################
+
+fpr.mean=apply(fpr_results,2,mean)
+fpr.sd=apply(fpr_results,2,sd)
+fnr.mean=apply(fnr_results,2,mean)
+fnr.sd=apply(fnr_results,2,sd)
+est.mean=apply(EE_results,2,mean)
+est.sd=apply(EE_results,2,sd)
+time.mean=apply(time_results,2,mean)
+time.sd=apply(time_results,2,sd)
+ex.mean=apply(EX_results,2,mean)
+ex.sd=apply(EX_results,2,sd)
+
+fpr.mean
+fpr.sd
+fnr.mean
+fnr.sd
+est.mean
+est.sd
+time.mean
+time.sd
+ex.mean
+ex.sd
+
+colMeans(beta.estall)[(2*z+1):(3*z)]
