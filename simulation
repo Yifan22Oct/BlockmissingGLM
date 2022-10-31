@@ -95,10 +95,6 @@ if(n1!=0){
 miss.type=1        # MCAR=1,MAR=2,NI=3
 blo4.in.y=FALSE    # block 4 has relevant predictors 
 
-if(miss.type==2){
-  blo4.in.y=FALSE
-}
-
 model.type=1       # linear model: 1 beta=0.5; logistics model: 2; poisson model: 3 beta=0.4  
 
 col.block1=1:p1
